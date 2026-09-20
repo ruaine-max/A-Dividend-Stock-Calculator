@@ -533,7 +533,8 @@ _ONES = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
 _TENS = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"]
 
 # Reevah's own names for 10^18 .. 10^33 (real names: quintillion .. decillion).
-# Million-Quadrillion keep their normal names; above Xenon the real names resume.
+# Million-Quadrillion keep their normal names; above Xenon the steps count up in
+# Roman numerals (Xenon = Xenon I, then Xenon II, Xenon III ...) -- "Kafam numbers".
 CUSTOM_ILLIONS = {5: "Omnion", 6: "Sixtiton", 7: "Setiton", 8: "Octoiton", 9: "Nieniton", 10: "Xenon"}
 
 
@@ -550,43 +551,32 @@ def _words_under_1000(n):
     return " ".join(parts)
 
 
-def illion_name(n, custom=False):
-    """Name for 10^(3n+3): million, billion ... centillion, and beyond that
-    the Conway-Wechsler system (the standard way to name very large numbers).
-    Valid for 1 <= n <= 999. With custom=True, 10^18..10^33 use CUSTOM_ILLIONS."""
-    if custom and n in CUSTOM_ILLIONS:
+def to_roman(n):
+    """Roman numeral for 1-3999."""
+    out = ""
+    for value, sym in [(1000, "M"), (900, "CM"), (500, "D"), (400, "CD"), (100, "C"), (90, "XC"),
+                       (50, "L"), (40, "XL"), (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I")]:
+        while n >= value:
+            out += sym
+            n -= value
+    return out
+
+
+def kafam_name(n):
+    """Kafam-number name for 10^(3n+3). n=1-4 are million..quadrillion, n=5-10 are
+    Omnion..Xenon, and after that Xenon II, Xenon III ... (Xenon N = 10^(30+3N))."""
+    real = ["", "million", "billion", "trillion", "quadrillion"]
+    if n <= 4:
+        return real[n]
+    if n in CUSTOM_ILLIONS:
         return CUSTOM_ILLIONS[n]
-    small = ["", "m", "b", "tr", "quadr", "quint", "sext", "sept", "oct", "non"]
-    teens = ["dec", "undec", "duodec", "tredec", "quattuordec", "quindec",
-             "sexdec", "septendec", "octodec", "novemdec"]
-    if n < 10:
-        return small[n] + "illion"
-    if n < 20:
-        return teens[n - 10] + "illion"
-    units = ["", "un", "duo", "tre", "quattuor", "quinqua", "se", "septe", "octo", "nove"]
-    tens = ["", "deci", "viginti", "triginta", "quadraginta", "quinquaginta",
-            "sexaginta", "septuaginta", "octoginta", "nonaginta"]
-    hundreds = ["", "centi", "ducenti", "trecenti", "quadringenti", "quingenti",
-                "sescenti", "septingenti", "octingenti", "nongenti"]
-    tens_marks = ["", "N", "MS", "NS", "NS", "NS", "N", "N", "MX", ""]
-    hundreds_marks = ["", "NX", "N", "NS", "NS", "NS", "N", "N", "MX", ""]
-    u, t, h = n % 10, (n // 10) % 10, n // 100
-    marks = tens_marks[t] if t else hundreds_marks[h]
-    unit = units[u]
-    if u == 3 and ("S" in marks or "X" in marks):
-        unit += "s"
-    elif u == 6:
-        unit += "s" if "S" in marks else ("x" if "X" in marks else "")
-    elif u in (7, 9):
-        unit += "m" if "M" in marks else ("n" if "N" in marks else "")
-    name = unit + tens[t] + hundreds[h]
-    return name[:-1] + "illion"  # every component ends in a vowel; drop it
+    step = n - 9                                   # Xenon itself is step 1 (n = 10)
+    return f"Xenon {to_roman(step)}" if step < 4000 else f"Xenon {step:,}"
 
 
-def number_in_words(value, custom=False):
-    """Spell a Decimal out in words. Anything large is rounded to 3
-    significant figures, e.g. 6.778e1283 -> 'about six hundred seventy-eight
-    sesvigintiquadringentillion'."""
+def number_in_words(value):
+    """Spell a Decimal out in words. Anything large is rounded to 3 significant
+    figures, e.g. 6.778e1283 -> 'about six hundred seventy-eight Xenon CDXVII'."""
     try:
         if value == 0:
             return "zero"
@@ -607,9 +597,6 @@ def number_in_words(value, custom=False):
         m = round(m, 0 if m >= 100 else (1 if m >= 10 else 2))
         if m >= 1000:
             m, n = Decimal(1), n + 1
-        if n > 999:                                    # beyond nameable range
-            mant = float(v / (Decimal(10) ** exponent))
-            return f"about {sign}{mant:.2f} times ten to the power of {exponent:,}"
         text = format(m, "f")
         if "." in text:
             text = text.rstrip("0").rstrip(".")
@@ -618,9 +605,26 @@ def number_in_words(value, custom=False):
         if frac:
             words += " point " + " ".join(_ONES[int(d)] for d in frac)
         about = "" if m * Decimal(10) ** (3 * n + 3) == v else "about "
-        return f"{about}{sign}{words} {illion_name(n, custom)}"
+        return f"{about}{sign}{words} {kafam_name(n)}"
     except Exception:
         return str(value)
+
+
+def show_kafam_table():
+    """Collapsed explainer + table for the Kafam number names."""
+    with st.expander("📖 Kafam numbers - how to read these names"):
+        rows = []
+        for n in range(1, 14):
+            label = "Xenon (= Xenon I)" if n == 10 else kafam_name(n)[:1].upper() + kafam_name(n)[1:]
+            rows.append(f"| {n} | {label} | 10^{3 * n + 3} |")
+        st.markdown(
+            "Each step is 1,000 times the one before. After **Xenon**, the steps count up in "
+            "Roman numerals: **Xenon N** is a 1 followed by (30 + 3 x N) zeros.\n\n"
+            "| # | Name | Size |\n|---|---|---|\n" + "\n".join(rows) +
+            "\n| ... | Xenon N | 10^(30 + 3N) |\n\n"
+            "Example: Xenon CDXVIII = 10^1284."
+        )
+
 
 # Streamlit UI
 st.set_page_config(page_title="Dividend Calculator", layout="wide")
@@ -891,8 +895,7 @@ if st.session_state.stock_data and st.session_state.stock_data["success"]:
             ]
             st.markdown("\n".join(
                 f"- **{label}:** {number_in_words(val)}{unit}" for label, val, unit in words_rows))
-            st.caption("Names above a centillion (10^303) follow the Conway-Wechsler system; "
-                       "they aren't everyday words because nothing in real life is this large.")
+            show_kafam_table()
             st.stop()
         
         # Summary metrics
@@ -940,7 +943,7 @@ if st.session_state.stock_data and st.session_state.stock_data["success"]:
             st.metric("Total Tax Paid", f"${total_tax_paid:,.0f}", 
                      delta=f"-{(total_tax_paid/total_gross_div*100):.1f}%")
         
-        # In words (uses the custom Omnion...Xenon ladder)
+        # In words (Kafam number names)
         st.subheader("🗣️ In words")
         words_rows = [
             ("Total Invested", total_invested, " dollars"),
@@ -952,13 +955,12 @@ if st.session_state.stock_data and st.session_state.stock_data["success"]:
             ("Total Tax Paid", total_tax_paid, " dollars"),
         ]
         words_lines = [
-            f"- **{label}:** {number_in_words(Decimal(str(float(val))), custom=True)}{unit}"
+            f"- **{label}:** {number_in_words(Decimal(str(float(val))))}{unit}"
             for label, val, unit in words_rows
         ]
         st.markdown("\n".join(words_lines))
         if any(name in line for line in words_lines for name in CUSTOM_ILLIONS.values()):
-            st.caption("Omnion = 10^18, Sixtiton = 10^21, Setiton = 10^24, "
-                       "Octoiton = 10^27, Nieniton = 10^30, Xenon = 10^33.")
+            show_kafam_table()
 
         # Charts
         st.header("📈 Projection Charts")
