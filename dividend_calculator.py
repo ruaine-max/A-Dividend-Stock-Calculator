@@ -165,6 +165,21 @@ def trailing_12mo_dividends(dividends):
         return 0.0
 
 
+def safe_float(value):
+    """Convert to a finite float, or None if invalid. Plain `x or default`
+    doesn't catch NaN -- NaN is truthy in Python, so `nan or 0` returns nan,
+    not 0. That gap let a NaN price from Yahoo (common for thin/newly
+    listed tickers) silently flow into the simulation and poison every
+    downstream number into inf/nan."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    if v != v or v in (float('inf'), float('-inf')):  # v != v is the NaN check
+        return None
+    return v
+
+
 @st.cache_data(ttl=3600)
 def fetch_stock_data(ticker):
     """Fetch live from yfinance, cached for an hour per ticker so repeated
@@ -184,21 +199,21 @@ def fetch_stock_data(ticker):
         if dividends is None:
             dividends = pd.Series(dtype=float)
 
-        current_price = info.get('currentPrice', info.get('regularMarketPrice'))
-        if not current_price and len(hist) == 0:
-            return {"success": False, "error": (
-                f"'{ticker}' not found or delisted -- no price data returned by Yahoo Finance."
-            )}
+        current_price = safe_float(info.get('currentPrice', info.get('regularMarketPrice')))
         if not current_price and len(hist) > 0:
-            current_price = float(hist['Close'].iloc[-1])
-        current_price = float(current_price or 0)
+            current_price = safe_float(hist['Close'].iloc[-1])
+        if not current_price:
+            return {"success": False, "error": (
+                f"'{ticker}': no valid price data returned by Yahoo Finance "
+                f"(got missing/NaN price -- this happens for very new or thinly-traded tickers)."
+            )}
 
         # Prefer yfinance's own dividendRate ($/share/year); fall back to
-        # trailing-12mo actual payments if that field is missing/zero.
-        dividend_rate = info.get('dividendRate') or 0
+        # trailing-12mo actual payments if that field is missing/zero/NaN.
+        dividend_rate = safe_float(info.get('dividendRate'))
         if not dividend_rate:
-            dividend_rate = trailing_12mo_dividends(dividends)
-        dividend_rate = float(dividend_rate or 0)
+            dividend_rate = safe_float(trailing_12mo_dividends(dividends))
+        dividend_rate = dividend_rate or 0.0
 
         dividend_yield = (dividend_rate / current_price * 100) if current_price > 0 else 0.0
 
@@ -283,6 +298,13 @@ def simulate_investment(initial_investment, current_price, annual_dividend_per_s
     periods_per_year = {"Weekly": 52, "Monthly": 12, "Quarterly": 4, "Annually": 1}
     dividend_periods = periods_per_year[dividend_freq]
     additional_periods = periods_per_year[additional_freq]
+
+    # Defensive guard: refuse to simulate on invalid price data rather than
+    # silently producing NaN/Infinity throughout the results (division by
+    # a zero/NaN price is exactly what corrupted every downstream number
+    # for tickers with bad Yahoo data).
+    if current_price is None or current_price != current_price or current_price <= 0:
+        return None
 
     weeks_per_year = 52
     total_weeks = investment_years * weeks_per_year
@@ -464,6 +486,23 @@ if st.session_state.stock_data and st.session_state.stock_data["success"]:
         dividend_frequency = st.selectbox("Dividend Frequency", freq_options,
                                          index=freq_options.index(div_freq_detected)
                                          if div_freq_detected in freq_options else 1)
+
+    # A high growth rate auto-filled from a short/volatile dividend history
+    # (common for newly-launched high-yield weekly funds) compounded over
+    # a long horizon produces enormous but not-technically-wrong numbers --
+    # flag this clearly so it doesn't read as a trustworthy projection.
+    EXTREME_GROWTH_THRESHOLD = 50.0
+    LONG_HORIZON_YEARS = 10
+    if (abs(dividend_growth_rate) > EXTREME_GROWTH_THRESHOLD
+            or abs(price_growth_rate) > EXTREME_GROWTH_THRESHOLD) and investment_years > LONG_HORIZON_YEARS:
+        st.warning(
+            f"⚠️ A growth rate above {EXTREME_GROWTH_THRESHOLD:.0f}%/year, compounded over "
+            f"{investment_years} years, will produce very large numbers that aren't a realistic "
+            f"forecast -- rates this high are usually an artifact of a short or volatile dividend "
+            f"history (common for newly-launched funds) and can't be sustained for decades. "
+            f"Consider lowering the growth rate(s) above to something you'd actually expect to "
+            f"hold long-term."
+        )
     
     st.divider()
     
@@ -516,6 +555,24 @@ if st.session_state.stock_data and st.session_state.stock_data["success"]:
             drip_enabled, investor_country, stock_country,
             override_withholding, override_domestic
         )
+
+        if results_df is None:
+            st.error(f"Can't run a projection: '{ticker}' has no valid price data to simulate from.")
+            st.stop()
+
+        # Guard against extreme growth-rate compounding overflowing to
+        # inf/NaN over a long horizon (e.g. a very high growth rate applied
+        # for 20-30 years can exceed float range). Catch it here with a
+        # clear message rather than displaying garbled numbers.
+        numeric_cols = ["portfolio_value", "shares", "gross_dividend", "net_dividend", "total_tax"]
+        if not np.isfinite(results_df[numeric_cols].to_numpy()).all():
+            st.error(
+                "The projection produced non-finite numbers (overflow) before reaching the end "
+                "of the investment period. This happens when the Dividend Growth Rate and/or "
+                "Share Price Growth Rate are too high to sustain when compounded over this many "
+                "years -- lower one or both, or shorten the Investment Period, and try again."
+            )
+            st.stop()
         
         # Summary metrics
         st.header("📊 Investment Summary")
