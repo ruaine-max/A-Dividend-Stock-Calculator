@@ -526,6 +526,102 @@ def format_large(value, prefix="$"):
     except Exception:
         return f"{prefix}{value}"
 
+
+_ONES = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+         "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen",
+         "eighteen", "nineteen"]
+_TENS = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"]
+
+# Reevah's own names for 10^18 .. 10^33 (real names: quintillion .. decillion).
+# Million-Quadrillion keep their normal names; above Xenon the real names resume.
+CUSTOM_ILLIONS = {5: "Omnion", 6: "Sixtiton", 7: "Setiton", 8: "Octoiton", 9: "Nieniton", 10: "Xenon"}
+
+
+def _words_under_1000(n):
+    """1-999 in English words (0 returns an empty string)."""
+    parts = []
+    if n >= 100:
+        parts.append(f"{_ONES[n // 100]} hundred")
+        n %= 100
+    if n >= 20:
+        parts.append(_TENS[n // 10] + (f"-{_ONES[n % 10]}" if n % 10 else ""))
+    elif n > 0:
+        parts.append(_ONES[n])
+    return " ".join(parts)
+
+
+def illion_name(n, custom=False):
+    """Name for 10^(3n+3): million, billion ... centillion, and beyond that
+    the Conway-Wechsler system (the standard way to name very large numbers).
+    Valid for 1 <= n <= 999. With custom=True, 10^18..10^33 use CUSTOM_ILLIONS."""
+    if custom and n in CUSTOM_ILLIONS:
+        return CUSTOM_ILLIONS[n]
+    small = ["", "m", "b", "tr", "quadr", "quint", "sext", "sept", "oct", "non"]
+    teens = ["dec", "undec", "duodec", "tredec", "quattuordec", "quindec",
+             "sexdec", "septendec", "octodec", "novemdec"]
+    if n < 10:
+        return small[n] + "illion"
+    if n < 20:
+        return teens[n - 10] + "illion"
+    units = ["", "un", "duo", "tre", "quattuor", "quinqua", "se", "septe", "octo", "nove"]
+    tens = ["", "deci", "viginti", "triginta", "quadraginta", "quinquaginta",
+            "sexaginta", "septuaginta", "octoginta", "nonaginta"]
+    hundreds = ["", "centi", "ducenti", "trecenti", "quadringenti", "quingenti",
+                "sescenti", "septingenti", "octingenti", "nongenti"]
+    tens_marks = ["", "N", "MS", "NS", "NS", "NS", "N", "N", "MX", ""]
+    hundreds_marks = ["", "NX", "N", "NS", "NS", "NS", "N", "N", "MX", ""]
+    u, t, h = n % 10, (n // 10) % 10, n // 100
+    marks = tens_marks[t] if t else hundreds_marks[h]
+    unit = units[u]
+    if u == 3 and ("S" in marks or "X" in marks):
+        unit += "s"
+    elif u == 6:
+        unit += "s" if "S" in marks else ("x" if "X" in marks else "")
+    elif u in (7, 9):
+        unit += "m" if "M" in marks else ("n" if "N" in marks else "")
+    name = unit + tens[t] + hundreds[h]
+    return name[:-1] + "illion"  # every component ends in a vowel; drop it
+
+
+def number_in_words(value, custom=False):
+    """Spell a Decimal out in words. Anything large is rounded to 3
+    significant figures, e.g. 6.778e1283 -> 'about six hundred seventy-eight
+    sesvigintiquadringentillion'."""
+    try:
+        if value == 0:
+            return "zero"
+        sign = "negative " if value < 0 else ""
+        v = abs(value)
+        if v < Decimal("999999.5"):
+            r = int(v.to_integral_value())
+            if r == 0:
+                return f"{sign}less than one"
+            words = _words_under_1000(r) if r < 1000 else (
+                _words_under_1000(r // 1000) + " thousand" +
+                (" " + _words_under_1000(r % 1000) if r % 1000 else ""))
+            about = "about " if abs(v - r) >= Decimal("0.005") else ""
+            return f"{about}{sign}{words}"
+        exponent = v.adjusted()
+        n = (exponent - 3) // 3
+        m = v / (Decimal(10) ** (3 * n + 3))          # 1 <= m < 1000
+        m = round(m, 0 if m >= 100 else (1 if m >= 10 else 2))
+        if m >= 1000:
+            m, n = Decimal(1), n + 1
+        if n > 999:                                    # beyond nameable range
+            mant = float(v / (Decimal(10) ** exponent))
+            return f"about {sign}{mant:.2f} times ten to the power of {exponent:,}"
+        text = format(m, "f")
+        if "." in text:
+            text = text.rstrip("0").rstrip(".")
+        int_part, _, frac = text.partition(".")
+        words = _words_under_1000(int(int_part))
+        if frac:
+            words += " point " + " ".join(_ONES[int(d)] for d in frac)
+        about = "" if m * Decimal(10) ** (3 * n + 3) == v else "about "
+        return f"{about}{sign}{words} {illion_name(n, custom)}"
+    except Exception:
+        return str(value)
+
 # Streamlit UI
 st.set_page_config(page_title="Dividend Calculator", layout="wide")
 
@@ -754,6 +850,19 @@ if st.session_state.stock_data and st.session_state.stock_data["success"]:
                 dividend_growth_terminal=terminal_growth_rate
             )
             st.header("📊 Investment Summary (arbitrary-precision)")
+            if taper_years > 0:
+                div_text = (f"dividends growing {dividend_growth_rate:,.1f}% a year at first, "
+                            f"tapering to {terminal_growth_rate:,.1f}% over {taper_years} years")
+            else:
+                div_text = f"dividends growing {dividend_growth_rate:,.1f}% every year"
+            drip_text = ", with every payout reinvested" if drip_enabled else ""
+            st.info(
+                "These numbers are far too big to be a real forecast. They come from assuming "
+                f"{div_text} and the share price growing {price_growth_rate:,.1f}% every year, "
+                f"for {investment_years} years{drip_text}. Growth rates that high usually come "
+                "from a young fund's short history and can't last for decades. "
+                "The plain-English version of each figure is at the bottom."
+            )
             m1, m2, m3 = st.columns(3)
             with m1:
                 st.metric("Total Invested", format_large(summary["total_invested"]))
@@ -769,6 +878,21 @@ if st.session_state.stock_data and st.session_state.stock_data["success"]:
                 st.metric("Net Dividends (After Tax)", format_large(summary["total_net_dividend"]))
             with m5:
                 st.metric("Total Tax Paid", format_large(summary["total_tax_paid"]))
+            st.subheader("🗣️ In words")
+            words_rows = [
+                ("Total Invested", summary["total_invested"], " dollars"),
+                ("Final Shares", summary["final_shares"], " shares"),
+                ("Final Portfolio Value", summary["portfolio_value"], " dollars"),
+                ("Final Share Price", summary["final_price"], " dollars"),
+                ("Total Return", summary["portfolio_value"] - summary["total_invested"], " dollars"),
+                ("Gross Dividends (total)", summary["total_gross_dividend"], " dollars"),
+                ("Net Dividends (After Tax)", summary["total_net_dividend"], " dollars"),
+                ("Total Tax Paid", summary["total_tax_paid"], " dollars"),
+            ]
+            st.markdown("\n".join(
+                f"- **{label}:** {number_in_words(val)}{unit}" for label, val, unit in words_rows))
+            st.caption("Names above a centillion (10^303) follow the Conway-Wechsler system; "
+                       "they aren't everyday words because nothing in real life is this large.")
             st.stop()
         
         # Summary metrics
@@ -816,6 +940,26 @@ if st.session_state.stock_data and st.session_state.stock_data["success"]:
             st.metric("Total Tax Paid", f"${total_tax_paid:,.0f}", 
                      delta=f"-{(total_tax_paid/total_gross_div*100):.1f}%")
         
+        # In words (uses the custom Omnion...Xenon ladder)
+        st.subheader("🗣️ In words")
+        words_rows = [
+            ("Total Invested", total_invested, " dollars"),
+            ("Final Portfolio Value", final_value, " dollars"),
+            ("Total Return", total_return, " dollars"),
+            ("Final Shares", final_row['shares'], " shares"),
+            ("Gross Dividends", total_gross_div, " dollars"),
+            ("Net Dividends (After Tax)", total_net_div, " dollars"),
+            ("Total Tax Paid", total_tax_paid, " dollars"),
+        ]
+        words_lines = [
+            f"- **{label}:** {number_in_words(Decimal(str(float(val))), custom=True)}{unit}"
+            for label, val, unit in words_rows
+        ]
+        st.markdown("\n".join(words_lines))
+        if any(name in line for line in words_lines for name in CUSTOM_ILLIONS.values()):
+            st.caption("Omnion = 10^18, Sixtiton = 10^21, Setiton = 10^24, "
+                       "Octoiton = 10^27, Nieniton = 10^30, Xenon = 10^33.")
+
         # Charts
         st.header("📈 Projection Charts")
         
