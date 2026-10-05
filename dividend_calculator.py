@@ -7,6 +7,17 @@ from datetime import datetime, timedelta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+def _st_version():
+    try:
+        return tuple(int(x) for x in st.__version__.split(".")[:2])
+    except Exception:
+        return (0, 0)
+
+
+# Newer Streamlit removed use_container_width in favour of width="stretch";
+# older versions only know use_container_width. Pick whichever this install supports.
+STRETCH = {"width": "stretch"} if _st_version() >= (1, 50) else {"use_container_width": True}
+
 getcontext().prec = 50  # arbitrary-precision fallback for overflowed projections
 
 # Tax data for various countries
@@ -193,14 +204,32 @@ def fetch_stock_data(ticker):
     has changed between yfinance versions and was the source of badly
     wrong yields (e.g. showing 0.045% instead of 4.5%)."""
     try:
+        ticker = (ticker or "").strip().upper()
         stock = yf.Ticker(ticker)
-        info = stock.info or {}
-        hist = stock.history(period="5y")
+        try:
+            info = stock.info or {}
+        except Exception:
+            info = {}  # Yahoo often blocks/changes .info; fall back to history + fast_info
+        try:
+            hist = stock.history(period="5y")
+        except Exception as e:
+            return {"success": False, "error": (
+                f"Couldn't download price history for '{ticker}' from Yahoo Finance ({e}). "
+                f"If this happens for every ticker, update yfinance: pip install -U yfinance")}
         if hist is None:
             hist = pd.DataFrame()
-        dividends = stock.dividends
+        try:
+            dividends = stock.dividends
+        except Exception:
+            dividends = None
         if dividends is None:
             dividends = pd.Series(dtype=float)
+        if not info.get('currentPrice') and not info.get('regularMarketPrice'):
+            try:
+                info = dict(info)
+                info['regularMarketPrice'] = stock.fast_info.get('lastPrice')
+            except Exception:
+                pass
 
         current_price = safe_float(info.get('currentPrice', info.get('regularMarketPrice')))
         if not current_price and len(hist) > 0:
@@ -812,7 +841,7 @@ if st.session_state.stock_data and st.session_state.stock_data["success"]:
     st.divider()
     
     # Calculate button
-    if st.button("📈 Calculate Investment Projection", type="primary", use_container_width=True):
+    if st.button("📈 Calculate Investment Projection", type="primary", **STRETCH):
         
         # Run simulation
         results_df = simulate_investment(
@@ -1025,7 +1054,7 @@ if st.session_state.stock_data and st.session_state.stock_data["success"]:
         
         fig.update_layout(height=800, showlegend=True)
         
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, **STRETCH)
         
         # Detailed table
         st.header("📋 Year-by-Year Breakdown")
@@ -1059,7 +1088,7 @@ if st.session_state.stock_data and st.session_state.stock_data["success"]:
         display_df['Return ($)'] = display_df['Return ($)'].apply(lambda x: f"${x:,.2f}")
         display_df['Return (%)'] = display_df['Return (%)'].apply(lambda x: f"{x:.2f}%")
         
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        st.dataframe(display_df, **STRETCH, hide_index=True)
         
         # Download button
         csv = results_df.to_csv(index=False)
